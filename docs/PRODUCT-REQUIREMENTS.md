@@ -1,112 +1,118 @@
 # Product Requirements Document
 
-<!--
-TEMPLATE: This is a template PRD. Run /bootstrap-product to fill it in
-with your product details through a guided questionnaire.
-
-Replace all [PLACEHOLDER] content with your actual product information.
-Remove the EXAMPLE markers when you replace the content.
--->
-
 ## Product Overview
 
-- **Name**: [Your product name]
-- **Type**: [Web app | Mobile app | API service | CLI tool | Library | Other]
-- **Category**: [B2B SaaS | B2C Consumer | Developer tools | E-commerce | Other]
+- **Type**: Web application
+- **Category**: Developer tools
+- **Domain**: A docs site for a developer platform (Agile Flow)
+- **Value Proposition**: Provide a great documentation experience for users of the Agile Flow agent harness.
 
 ## Vision and Problem Statement
 
 ### Problem
 
-[Describe the problem your product solves in 1-3 sentences.]
-
-<!-- EXAMPLE -- replace with your content:
-Development teams waste 40% of their time on repetitive coordination tasks
-that could be automated with AI agents, but lack safe guardrails for
-integrating AI into their workflows.
--->
+Agile Flow users today have only one way to learn the platform: read raw
+markdown files inside the GitHub repo. That works for the technically
+fluent but is inaccessible to "civilians" — including the solo founders
+who are the platform's primary audience.
 
 ### Vision
 
-[One sentence describing the ideal future state your product creates.]
+A dedicated docs site that helps users maximize the value of Agile Flow
+by clearly explaining how to use it, lowering cognitive load and
+shortening time-to-first-value.
 
 ### How People Solve This Today
 
-[What alternatives or workarounds exist? Why are they inadequate?]
+The only existing documentation is markdown in the repository itself.
+This is not accessible to non-technical or evaluating users — it requires
+navigating GitHub, reading raw markdown, and stitching context together
+across files.
 
 ## Target Audience
 
 ### Primary Users
 
-- **Who**: [Role, context, and goal in one sentence]
-- **Pain Point**: [The #1 problem they face]
-- **Current Solution**: [How they solve it today]
+- **Who**: A solo founder who wants to ship a product using Agile Flow.
+- **Pain Point**: Cognitive load — too much to keep in working memory while learning a multi-agent harness.
+- **Current Solution**: Reading markdown directly on GitHub.
+
+The audience also includes people **evaluating** Agile Flow who need to
+decide whether to adopt — better docs directly improve their evaluation
+experience and conversion likelihood.
 
 ### Secondary Users
 
-[Other user types, or "None -- single user type"]
+None — single user type.
 
 ## Features
 
 ### MVP (Must Have)
 
-<!-- List 3-5 features that MUST be in v1. Be specific and testable. -->
-
-- [ ] [Feature 1 -- specific and measurable]
-- [ ] [Feature 2]
-- [ ] [Feature 3]
+- [ ] **Search** — full-text search across all docs content; primary navigation method.
+- [ ] **Loom video embeds in context** — ability to link or embed Loom videos directly inside doc pages.
+- [ ] **Slash-command cheat sheet** — at-a-glance reference of the main `/` commands available in the harness.
+- [ ] **Agent roster** — page that lists each agent with an avatar and short bio.
+- [ ] **Flow diagram** — visual diagram of how the agents and artifacts flow through the workflow.
+- [ ] **Mailing list signup + seminar lead page** — capture interest for the seminar and grow a contact list.
 
 ### Out of Scope (v1)
 
-<!-- Equally important: what are you NOT building? -->
-
-- [Feature explicitly excluded from v1]
+- User login / authentication. The site is fully public for v1.
 
 ### Core Value Proposition
 
-[The ONE thing your product must do exceptionally well.]
+The product must do **search** exceptionally well. Search is the primary
+way users will route around their cognitive-load problem and find the
+answer they need fast.
 
 ## Success Metrics
 
 | Metric | Target (3 months) |
 |--------|-------------------|
-| Primary: [e.g., Monthly active users] | [e.g., 500] |
-| Secondary: [e.g., Retention rate] | [e.g., 60%] |
+| Primary: Click-throughs from docs to vibeacademy repos (leading indicator of intent-to-fork) | 100 click-throughs |
 
 ## Competitive Analysis
 
 | Competitor | Strength | Weakness | Your Differentiator |
 |-----------|----------|----------|---------------------|
-| [Name] | [What they do well] | [Where they fall short] | [Why you win] |
+| Reading the Agile Flow markdown on GitHub directly (the only alternative) | Always current with source | Raw markdown, no search, no diagrams, no embedded video, hostile to non-technical users | Purpose-built docs experience: search, navigation, embedded video, and visual diagrams aimed at solo founders and evaluators |
 
 ## Constraints and Requirements
 
-- **Timeline**: [When do you need to launch?]
-- **Budget**: [Resource constraints]
-- **Technical**: [Must-use technologies, compliance requirements]
-- **Team**: [Available expertise]
+- **Timeline**: ASAP — target launch within 1-2 weeks.
+- **Budget**: Not a binding constraint.
+- **Technical**: Built on **Astro + Starlight**.
+- **Team**: Solo founder.
 
 ## Non-Functional Requirements
 
 | Category | Requirement |
 |----------|-------------|
-| Security | [Auth approach, data protection] |
-| Performance | [Latency, throughput targets] |
-| Scalability | [Expected load, growth] |
-| Accessibility | [WCAG level, requirements] |
+| Security | Public site, no auth in v1. Standard HTTPS. |
+| Performance | Search results return in under 200 ms on the client; page loads under 2 s on a typical connection. |
+| Scalability | Static site — capacity is essentially CDN-bound. |
+| Accessibility | WCAG 2.1 AA as a working target (Starlight's defaults). |
 
 ## Dependencies
 
-- [External service or tool this product depends on]
+- Astro + Starlight (site framework).
+- Loom (embedded video host).
+- Mailing-list provider for signup capture (TBD during architecture phase).
+- vibeacademy repos (click-through destination for the primary metric).
 
 ## Risks and Mitigations
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| [Risk description] | High/Medium/Low | [How to prevent or handle] |
+| 1-2 week launch window is tight | High | Keep MVP scope frozen at the six features above; defer everything else. |
+| Search quality is the make-or-break feature | High | Use Starlight's built-in search and tune content for findability before adding any custom search work. |
+| Docs drift from the underlying Agile Flow repo | Medium | Establish a simple sync/review cadence after launch; out of scope for v1. |
 
 ## Glossary
 
 | Term | Definition |
 |------|------------|
-| [Domain term] | [What it means in this product] |
+| Agile Flow | The agent harness / developer platform that this docs site documents. |
+| Slash command | A `/`-prefixed command used inside the Agile Flow harness. |
+| Vibeacademy | The downstream repos users fork from after deciding to adopt Agile Flow. |
