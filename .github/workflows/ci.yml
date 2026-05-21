@@ -179,27 +179,28 @@ jobs:
             echo "No package.json found -- skipping Node.js checks."
           fi
 
+      # Node 22 LTS. Astro 6 (and create-astro 5.x) requires >=22.12.0.
+      # This is locked in package.json `engines.node` and in
+      # `.devcontainer/devcontainer.json` for parity across environments.
       - name: Setup Node.js
         if: steps.check_node.outputs.skip != 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
+          cache: 'npm'
 
       - name: Install dependencies
         if: steps.check_node.outputs.skip != 'true'
         run: npm ci
 
-      - name: Lint
+      # `astro check` performs TypeScript + content-collection schema +
+      # link-graph validation in one pass. The framework template assumed a
+      # separate lint/typecheck/test triple; for an Astro+Starlight site
+      # this is the canonical single check. `npm run lint` and
+      # `npm run check` are aliased to `astro check` in package.json.
+      - name: Astro check (lint + typecheck)
         if: steps.check_node.outputs.skip != 'true'
-        run: npm run lint
-
-      - name: Type check
-        if: steps.check_node.outputs.skip != 'true'
-        run: npm run typecheck
-
-      - name: Test
-        if: steps.check_node.outputs.skip != 'true'
-        run: npm test
+        run: npm run check
 
       - name: Build
         if: steps.check_node.outputs.skip != 'true'
