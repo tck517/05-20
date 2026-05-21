@@ -171,38 +171,48 @@ TEMPLATE: Fill in project-specific details below when using this template.
 - **Repository**: [GitHub repo URL]
 - **Project Board**: [GitHub project board URL]
 <!-- bootstrap:project-config:end -->
-- **Tech Stack**: FastAPI + Jinja2 + HTMX on Python 3.12
-- **Database layer**: SQLModel + Alembic
-- **Platform**: Google Cloud Platform (Cloud Run)
-- **Database**: Neon (serverless Postgres with per-PR branching)
-- **Container Registry**: Artifact Registry
-- **Secrets**: Google Secret Manager
-- **Package manager**: uv
+- **Tech Stack**: Astro 6 + Starlight 0.39 on TypeScript (strict)
+- **Content**: MDX under `src/content/docs/`
+- **Search**: Pagefind (bundled via Starlight; client-side, no infra)
+- **Platform**: Cloudflare Pages (static hosting on global anycast CDN)
+- **Runtime**: Node.js 22 LTS (build-time only; output is static)
+- **Package manager**: npm
+
+For full architecture see [docs/TECHNICAL-ARCHITECTURE.md](docs/TECHNICAL-ARCHITECTURE.md);
+platform-level decisions live in [.claude/PROJECT.md](.claude/PROJECT.md).
 
 ### Build & Test Commands
 
 ```bash
-uv sync --extra dev                              # Install dependencies
-uv run uvicorn app.main:app --reload --port 8080 # Dev server
-uv run ruff check .                              # Lint
-uv run ruff format .                             # Format
-uv run mypy app/                                 # Type check
-uv run pytest                                    # Tests
-uv run pytest --cov=app --cov-report=term-missing # Tests with coverage
-uv run alembic upgrade head                      # Apply migrations
-uv run alembic revision --autogenerate -m "msg"  # Create a new migration
-docker build -t agile-flow-app .                 # Local container build
+npm ci                # Install pinned dependencies
+npm run dev           # Dev server (http://localhost:4321)
+npm run build         # Static build -> dist/
+npm run preview       # Preview the built site
+npm run check         # astro check (TS + content schema + frontmatter)
+npm run lint          # Alias of npm run check
+```
+
+Node 22+ is required (locked in `package.json` `engines.node`). On a fresh
+Codespace or local machine without nvm-default 22:
+
+```bash
+source /usr/local/share/nvm/nvm.sh && nvm install 22 && nvm use 22
 ```
 
 ### Definition of Ready
 
 A ticket is ready when it has: clear title, description with context,
 testable acceptance criteria, effort estimate, priority label, no blockers.
+For new MDX pages, "testable" means: page renders on `npm run dev`, search
+indexes the new content, sidebar (if applicable) is updated in
+`astro.config.mjs`.
 
 ### Definition of Done
 
 A ticket is done when: all acceptance criteria met, code reviewed and
-approved, tests passing, no lint errors, PR merged to main.
+approved, `astro check` clean, `astro build` succeeds, PR merged to main.
+Deploy-affecting changes additionally require a green preview deployment on
+Cloudflare Pages.
 
 ---
 
