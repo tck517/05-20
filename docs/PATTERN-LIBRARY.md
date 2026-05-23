@@ -67,6 +67,12 @@
 36. [Firebase Auth: Authorized Domains for Cloud Run Preview Environments](#36-firebase-auth-authorized-domains-for-cloud-run-preview-environments)
 37. [Firebase Auth: Session Cookies vs ID Tokens on the Server](#37-firebase-auth-session-cookies-vs-id-tokens-on-the-server)
 
+### Neon Authentication
+
+38. [Neon Auth: Magic Link OAuth Flow (FastAPI + HTMX)](#38-neon-auth-magic-link-oauth-flow-fastapi--htmx)
+39. [Neon Auth: Trusted Domains for Cloud Run Preview Environments](#39-neon-auth-trusted-domains-for-cloud-run-preview-environments)
+40. [Migration: Firebase Auth → Neon Auth](#40-migration-firebase-auth--neon-auth)
+
 ### Workshop Operations
 
 29. [Workshop: Participant Email Must Match Their Google Identity](#29-workshop-participant-email-must-match-their-google-identity)
@@ -1688,3 +1694,467 @@ async def logout(response: Response, user: User | None = Depends(optional_user))
 `revoke_refresh_tokens` invalidates all existing session cookies and ID tokens
 for the user. Without this, a stolen session cookie remains valid until it
 expires naturally.
+
+---
+
+## 38. Neon Auth: Magic Link OAuth Flow (FastAPI + HTMX)
+
+**Pattern:** The complete recipe for adding passwordless sign-in to this fork's
+FastAPI + Jinja2 + HTMX stack using **Neon Auth** (Stack Auth-based). Implemented
+in `app/auth/neon/`. Cross-reference with upstream pattern #24 (Next.js + Supabase
+equivalent) and pattern #35 (Firebase equivalent in this same fork).
+
+> **Endpoint paths shown below are illustrative.** Neon Auth is built on Stack
+> Auth, and the exact endpoint shape may differ in your project (e.g.
+> `/handler/authorize` rather than `/authorize`). Verify the current paths
+> against the [Neon Auth documentation](https://neon.tech/docs/neon-auth) for
+> your project version before copy-pasting.
+
+### Why the split between Neon and your server?
+
+Unlike Firebase (where the client must call the Web SDK to exchange the magic
+link's `oobCode`), Neon Auth handles email delivery and token verification
+**entirely server-side via OAuth 2.0 / OIDC**. Your FastAPI app:
+
+1. Redirects users to Neon's `/authorize` endpoint (HTTP 302)
+2. Neon emails the user a magic link → user clicks → Neon redirects back to your
+   `/auth/callback` with a `code` + `state`
+3. Your server exchanges the `code` for tokens at Neon's `/oauth/token`
+4. Your server fetches user info at Neon's `/userinfo`
+5. Your server issues its own session cookie (signed, HttpOnly)
+
+No client-side SDK required. This is the key win over Firebase for HTMX apps.
+
+### Step 1: Environment Variables
+
+Add to `.env.example` and Cloud Run secrets:
+
+```bash
+NEON_AUTH_URL=https://auth.neon.tech          # Neon Auth endpoint base
+NEON_PROJECT_ID=your-neon-project-id          # From Neon Console
+NEON_AUTH_CLIENT_ID=your-client-id            # Neon Console → Auth → OAuth
+NEON_AUTH_CLIENT_SECRET=your-client-secret    # Neon Console → Auth → OAuth
+APP_BASE_URL=https://your-service-uc.a.run.app  # Your Cloud Run service URL
+SESSION_SECRET=your-session-signing-secret    # For signing app session cookies
+```
+
+### Step 2: FastAPI Routes (`app/auth/neon/routes.py`)
+
+```python
+"""Neon Auth (Stack Auth-based) OAuth integration for FastAPI + HTMX."""
+
+import secrets
+from datetime import UTC, datetime
+from typing import Annotated
+from urllib.parse import urlencode
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import RedirectResponse
+from sqlalchemy.orm import Session
+
+from app.config import Settings, get_settings
+from app.db import get_session
+from app.models.user import User
+from app.services.session import SESSION_COOKIE_NAME, sign_session
+
+router = APIRouter()
+SettingsDep = Annotated[Settings, Depends(get_settings)]
+
+
+@router.get("/login")
+def login(settings: SettingsDep) -> RedirectResponse:
+    """Redirect to Neon Auth for magic-link sign-in."""
+
+    # One-time state for CSRF protection on the /auth/callback round-trip
+    state = secrets.token_urlsafe(32)
+
+    callback_url = f"{settings.app_base_url}/auth/callback"
+
+    params = {
+        "client_id": settings.neon_auth_client_id,
+        "redirect_uri": callback_url,
+        "response_type": "code",
+        "scope": "openid email",
+        "state": state,
+    }
+
+    auth_url = f"{settings.neon_auth_url}/authorize?{urlencode(params)}"
+    response = RedirectResponse(url=auth_url)
+    # Short-lived, HttpOnly cookie so /auth/callback can verify the state.
+    # samesite="lax" is required so the cookie survives the OAuth redirect.
+    response.set_cookie(
+        key="auth_state",
+        value=state,
+        max_age=600,  # 10 min — the auth flow should complete quickly
+        httponly=True,
+        secure=True,
+        samesite="lax",
+    )
+    return response
+
+
+@router.get("/auth/callback")
+async def auth_callback(
+    request: Request,
+    code: str,
+    state: str,
+    settings: SettingsDep,
+    db: Session = Depends(get_session),
+) -> RedirectResponse:
+    """Handle Neon Auth callback, exchange code for tokens, create session."""
+
+    # CSRF: verify the state cookie matches the state Neon echoed back.
+    # secrets.compare_digest is constant-time to defeat timing side-channels.
+    expected_state = request.cookies.get("auth_state")
+    if not expected_state or not secrets.compare_digest(state, expected_state):
+        raise HTTPException(status_code=400, detail="Invalid state — possible CSRF")
+
+    # Exchange authorization code for tokens
+    async with httpx.AsyncClient() as client:
+        token_response = await client.post(
+            f"{settings.neon_auth_url}/oauth/token",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": settings.neon_auth_client_id,
+                "client_secret": settings.neon_auth_client_secret,
+                "code": code,
+                "redirect_uri": f"{settings.app_base_url}/auth/callback",
+            },
+        )
+
+    if token_response.status_code != 200:
+        raise HTTPException(status_code=401, detail="Authentication failed")
+
+    tokens = token_response.json()
+
+    # Get user info from Neon
+    async with httpx.AsyncClient() as client:
+        userinfo_response = await client.get(
+            f"{settings.neon_auth_url}/userinfo",
+            headers={"Authorization": f"Bearer {tokens['access_token']}"},
+        )
+
+    if userinfo_response.status_code != 200:
+        raise HTTPException(status_code=401, detail="Failed to get user info")
+
+    userinfo = userinfo_response.json()
+    email = userinfo["email"]
+
+    # Find or create user in your Neon database
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        user = User(email=email, created_at=datetime.now(UTC))
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    # Issue our own session cookie (separate from Neon's tokens — Neon is now done)
+    cookie_value = sign_session(user_id=user.id, secret=settings.session_secret)
+
+    response = RedirectResponse(url="/dashboard", status_code=303)
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=cookie_value,
+        max_age=settings.session_ttl_days * 86400,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+    )
+    # Clear the one-time auth_state cookie — the CSRF round-trip is complete
+    response.delete_cookie(key="auth_state")
+    return response
+
+
+@router.get("/logout")
+def logout() -> RedirectResponse:
+    """Clear app session cookie and redirect home."""
+    response = RedirectResponse(url="/", status_code=303)
+    response.delete_cookie(key=SESSION_COOKIE_NAME)
+    return response
+```
+
+### Step 3: HTMX Login Page (`templates/login.html`)
+
+```html
+<!-- A plain link is sufficient — no client SDK, no JS required. -->
+<a href="/login"
+   class="btn btn-primary"
+   hx-boost="false"><!-- HTMX must not intercept a real navigation -->
+  Sign in with email
+</a>
+```
+
+`hx-boost="false"` is critical — HTMX's default behavior would AJAX the link
+and break the OAuth redirect. Real navigation is required so the browser
+follows the 302 to Neon's `/authorize`.
+
+### Step 4: Auth Dependency for Protected Routes
+
+```python
+# app/services/auth.py — unchanged from Firebase setup if you used af_session.
+# The session cookie is now signed by sign_session() and validated by your code,
+# not by Firebase. No firebase_admin import needed.
+
+async def current_user(
+    request: Request,
+    db: Session = Depends(get_session),
+    settings: SettingsDep,
+) -> User:
+    cookie = request.cookies.get(SESSION_COOKIE_NAME)
+    if not cookie:
+        raise HTTPException(status_code=401)
+    payload = verify_session(cookie, settings.session_secret)
+    user = db.get(User, payload["user_id"])
+    if not user:
+        raise HTTPException(status_code=401)
+    return user
+```
+
+### Key Differences from Firebase Auth (Pattern #35)
+
+| Firebase Auth | Neon Auth |
+|---|---|
+| Client SDK required (`auth.signInWithEmailLink`) | No client SDK — pure server-side OAuth |
+| Magic link contains `oobCode` query param | Magic link contains nothing app-readable; user clicks → returns to `/auth/callback` |
+| Server-side `verify_id_token()` after client posts ID token | Server-side `code` exchange at `/oauth/token` |
+| Session cookie from Firebase Admin (`auth.create_session_cookie`) | Session cookie from `sign_session()` (your own signed cookie) |
+| `firebase_admin` Python dependency required | `httpx` only — already in stack |
+| `revoke_refresh_tokens` for logout | Logout = delete cookie (Neon tokens already discarded) |
+| Authorized domains list in Firebase Console | Trusted domains list in Neon Console (see #39) |
+
+### Common Mistakes
+
+| Mistake | Symptom | Fix |
+|---|---|---|
+| Forgetting `samesite="lax"` on `auth_state` cookie | Cookie missing in callback → CSRF check fails | Always `samesite="lax"` on state cookie |
+| Using `samesite="strict"` instead | Same as above — cookie blocked on OAuth redirect | Lax, not strict |
+| HTMX intercepting the login link | Link fires AJAX, no redirect happens | `hx-boost="false"` on the anchor |
+| Hardcoded callback URL | Works in prod, fails in preview | Read from `APP_BASE_URL` env var |
+| Storing Neon tokens in your session | Bloat + Neon token revocation issues | Discard Neon tokens after `/userinfo`; only keep your `user_id` |
+| Missing `state` cookie cleanup on success | Cookie persists, can be replayed | `response.delete_cookie("auth_state")` before returning |
+
+---
+
+## 39. Neon Auth: Trusted Domains for Cloud Run Preview Environments
+
+**Gotcha:** Neon Auth validates the `redirect_uri` of every OAuth flow against a
+whitelist of "trusted domains" configured in the Neon Console. Cloud Run preview
+URLs (`https://pr-42---service-name-abcxyz-uc.a.run.app`) are dynamically
+generated per PR. Without configuration, Neon rejects the callback with:
+
+```
+{"error": "invalid_request", "error_description": "redirect_uri not trusted"}
+```
+
+**Pattern:**
+
+Neon Auth supports **wildcard trusted domains** (shipped May 2026 — verify
+against [Neon release notes](https://neon.tech/docs/changelog)). Use the most
+specific wildcard possible to cover all preview URLs.
+
+### Step 1: Identify Your Preview URL Pattern
+
+Cloud Run revision-tagged preview URL shape:
+
+```
+https://pr-<NUMBER>---<SERVICE>-<HASH>-<REGION>.a.run.app
+```
+
+For this fork's standard Cloud Run setup:
+
+```
+https://pr-42---my-service-abcxyz-uc.a.run.app
+```
+
+### Step 2: Add Wildcard in Neon Console
+
+Navigate to: **Neon Console → Project → Auth → Trusted Domains → Add Domain**
+
+```
+https://pr-*---my-service-abcxyz-uc.a.run.app/auth/callback
+```
+
+**Critical:** Use the most specific wildcard possible.
+`https://*.a.run.app` is too broad — it would trust ANY Cloud Run service in
+any GCP project. The `---my-service-abcxyz-uc` segment pins it to your service.
+
+### Step 3: Verify in `preview-deploy.yml`
+
+```yaml
+# .github/workflows/preview-deploy.yml
+- name: Surface Neon trusted-domain coverage in PR comment
+  if: github.event_name == 'pull_request'
+  run: |
+    echo "Preview URL: ${PREVIEW_URL}"
+    echo "Ensure Neon Console has wildcard:"
+    echo "  https://pr-*---${SERVICE_NAME}-${HASH}-${REGION}.a.run.app/auth/callback"
+```
+
+### If Wildcards Don't Work (Fallback: Per-PR Registration)
+
+If your URL pattern doesn't fit Neon's wildcard syntax, register per PR:
+
+```yaml
+# preview-deploy.yml
+- name: Add preview URL to Neon trusted domains
+  if: github.event_name == 'pull_request'
+  env:
+    NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+    NEON_PROJECT_ID: ${{ secrets.NEON_PROJECT_ID }}
+  run: |
+    curl -sS -X POST \
+      "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/auth/trusted_domains" \
+      -H "Authorization: Bearer ${NEON_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d "{\"domain\": \"${PREVIEW_URL}/auth/callback\"}"
+```
+
+And clean up on PR close:
+
+```yaml
+# preview-cleanup.yml
+- name: Remove preview URL from Neon trusted domains
+  if: github.event.action == 'closed'
+  run: |
+    # Fetch the domain ID by URL match, then DELETE
+    DOMAIN_ID=$(curl -sS \
+      "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/auth/trusted_domains" \
+      -H "Authorization: Bearer ${NEON_API_KEY}" \
+      | jq -r ".domains[] | select(.domain == \"${PREVIEW_URL}/auth/callback\") | .id")
+    [ -n "$DOMAIN_ID" ] && curl -sS -X DELETE \
+      "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/auth/trusted_domains/${DOMAIN_ID}" \
+      -H "Authorization: Bearer ${NEON_API_KEY}"
+```
+
+### Comparison with Firebase (Pattern #36)
+
+| Firebase Auth (Pattern #36) | Neon Auth (this pattern) |
+|---|---|
+| "Authorized Domains" in Firebase Console | "Trusted Domains" in Neon Console |
+| Doesn't accept `*.a.run.app` wildcards | Supports specific wildcards (e.g., `https://pr-*---svc-hash-region.a.run.app`) |
+| Domain ownership verification required for non-Google domains | API-key-authenticated; no DNS challenge |
+| Fallback: manual entry per environment | Fallback: API-managed per-PR registration |
+
+---
+
+## 40. Migration: Firebase Auth → Neon Auth
+
+**Gotcha:** Migrating from Firebase Auth (Pattern #35) to Neon Auth (Pattern #38)
+straight-cutting risks breaking auth for active users with valid Firebase
+session cookies. Use a phased rollout with a feature flag.
+
+**Pattern:**
+
+A 4-phase migration. Each phase is reversible until Phase 4 completes.
+
+### Phase 1: Ship Neon Auth Alongside Firebase
+
+Add to `app/config.py`:
+
+```python
+class Settings(BaseSettings):
+    auth_provider: Literal["firebase", "neon", "both"] = "firebase"
+```
+
+Mount both auth routers:
+
+```python
+# app/main.py
+from app.auth.firebase import routes as firebase_auth
+from app.auth.neon import routes as neon_auth
+
+app.include_router(firebase_auth.router, prefix="/auth/firebase")
+app.include_router(neon_auth.router)  # /login, /auth/callback at root
+```
+
+Update the login page:
+
+```python
+@app.get("/login")
+def login_page(settings: SettingsDep):
+    if settings.auth_provider == "neon":
+        return RedirectResponse("/auth/neon/login")
+    elif settings.auth_provider == "both":
+        return templates.TemplateResponse("login_both.html", ...)
+    else:
+        return RedirectResponse("/auth/firebase/login")
+```
+
+### Phase 2: Parallel Testing (1–2 weeks in staging)
+
+Deploy with `AUTH_PROVIDER=both` to staging:
+
+```bash
+gcloud run services update my-service \
+  --update-env-vars AUTH_PROVIDER=both \
+  --region us-central1 \
+  --tag staging
+```
+
+Manual test matrix:
+- [ ] New user signs in via Firebase → session works
+- [ ] New user signs in via Neon → session works
+- [ ] Existing Firebase session cookie still valid after deploy
+- [ ] Logout clears the right cookie for each provider
+
+### Phase 3: Full Cutover (production)
+
+```bash
+gcloud run services update my-service \
+  --update-env-vars AUTH_PROVIDER=neon \
+  --region us-central1
+```
+
+Monitor for 1 week:
+- Auth failure rate (`/login` 4xx/5xx)
+- Support tickets mentioning "can't sign in"
+- Active session count (Firebase cookies expiring naturally, Neon cookies replacing)
+
+### Phase 4: Cleanup (only after 2 weeks of stable Phase 3)
+
+1. **Remove Firebase code paths**
+   - Delete `app/auth/firebase/` directory
+   - Remove `firebase-admin` from `pyproject.toml`
+   - Remove `firebase_admin.initialize_app(...)` from `app/main.py`
+2. **Drop Firebase artifacts**
+   - Delete the Firebase project (or set it to inactive) in Firebase Console
+   - Remove `FIREBASE_*` env vars from Cloud Run + GitHub secrets
+   - Remove Authorized Domains entries from Firebase Console
+3. **Remove the migration scaffolding**
+   - Delete `templates/login_both.html`
+   - Simplify `app/config.py`: remove `auth_provider`, no flag needed
+   - Simplify `/login` endpoint: single redirect to `/auth/callback` flow
+
+### Migration Checklist
+
+- [ ] Neon Auth project created in Neon Console; OAuth client provisioned
+- [ ] Trusted domains configured (production URL + Cloud Run preview wildcard per #39)
+- [ ] `NEON_AUTH_*` secrets added to GitHub repo + Cloud Run
+- [ ] `auth_provider` flag added to `Settings`
+- [ ] Both routers mounted in `app/main.py`
+- [ ] Manual test matrix passed on staging with `AUTH_PROVIDER=both`
+- [ ] `AUTH_PROVIDER=both` deployed to production; monitored 1 week
+- [ ] `AUTH_PROVIDER=neon` deployed; monitored 2 weeks
+- [ ] Firebase code removed (separate PR per Phase 4 step for reversibility)
+- [ ] `firebase-admin` dependency dropped
+- [ ] Firebase Console set to inactive (don't delete immediately — 30-day cooldown)
+- [ ] `auth_provider` flag removed
+
+### Why a Cookie Migration is NOT Needed
+
+Firebase session cookies (`af_session` in this fork — see Pattern #37) and Neon
+Auth session cookies (`af_session` or whatever your `SESSION_COOKIE_NAME` is —
+same name OK) coexist because:
+
+- During `both` phase, `current_user()` accepts either signature
+- After cutover, old Firebase cookies fail to verify and the user is bounced to
+  `/login`, which now redirects to Neon
+- No forced logout required; natural attrition over the cookie's max-age
+
+If `SESSION_COOKIE_NAME` is shared between Firebase and Neon paths (recommended
+for migration), `current_user()` must try Firebase verification first and fall
+back to Neon-signed verification on failure during the `both` phase. After
+Phase 4, drop the Firebase branch.
+
+---
